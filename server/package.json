@@ -1,0 +1,23 @@
+{
+  "name": "securechat-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate-certs": "node scripts/generate-certs.mjs",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.100.0",
+    "dotenv": "^16.4.5",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.16.5",
+    "@types/ws": "^8.5.14",
+    "selfsigned": "^2.4.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.3"
+  }
+}
