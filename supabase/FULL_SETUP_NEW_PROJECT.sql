@@ -36,7 +36,8 @@ security definer
 set search_path = public
 as $$
 begin
-  insert into public.profiles (id, username) values (new.id, null);
+  insert into public.profiles (id, username) values (new.id, null)
+  on conflict (id) do nothing;
   return new;
 end;
 $$;
