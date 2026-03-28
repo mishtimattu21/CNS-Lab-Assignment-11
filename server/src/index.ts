@@ -1,3 +1,4 @@
+import http from 'node:http';
 import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -20,6 +21,31 @@ const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPA
 const PORT = Number(process.env.PORT) || 3001;
 const SSL_KEY_PATH = process.env.SSL_KEY_PATH || path.join(__dirname, '../certs/server.key');
 const SSL_CERT_PATH = process.env.SSL_CERT_PATH || path.join(__dirname, '../certs/server.crt');
+
+function envFlag(v: string | undefined): boolean {
+  if (!v) return false;
+  const s = String(v).trim().toLowerCase();
+  return s === '1' || s === 'true' || s === 'yes';
+}
+
+/**
+ * Render (and similar) terminate TLS; the app receives HTTP on PORT.
+ * Prefer env flags; `/opt/render` exists on Render hardware when vars are missing from the process.
+ */
+function isRenderRuntime(): boolean {
+  try {
+    return fs.existsSync('/opt/render');
+  } catch {
+    return false;
+  }
+}
+
+const usePlainHttp =
+  envFlag(process.env.USE_HTTP) ||
+  envFlag(process.env.RENDER) ||
+  Boolean(process.env.RENDER_SERVICE_ID?.trim()) ||
+  Boolean(process.env.RENDER_EXTERNAL_URL?.trim()) ||
+  isRenderRuntime();
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   console.error('Missing Supabase credentials for the WSS server.\n');
@@ -133,24 +159,34 @@ function joinRoom(meta: ClientMeta, groupCode: string) {
   });
 }
 
-let key: Buffer;
-let cert: Buffer;
-try {
-  key = fs.readFileSync(SSL_KEY_PATH);
-  cert = fs.readFileSync(SSL_CERT_PATH);
-} catch {
-  console.error(
-    `TLS files not found.\n  Expected key: ${SSL_KEY_PATH}\n  Expected cert: ${SSL_CERT_PATH}\n` +
-      'Generate with: openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt -days 365 -nodes -subj "/CN=localhost"\n' +
-      'Place files in server/certs/ (see server/README.md).'
-  );
-  process.exit(1);
-}
-
-const server = https.createServer({ key, cert }, (_req, res) => {
+const probeHandler = (_req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end('SecureChat SSL WebSocket server (HTTPS probe OK)\n');
-});
+  res.end(
+    usePlainHttp
+      ? 'SecureChat WebSocket server (HTTP behind TLS terminator — probe OK)\n'
+      : 'SecureChat SSL WebSocket server (HTTPS probe OK)\n'
+  );
+};
+
+const server = usePlainHttp
+  ? http.createServer(probeHandler)
+  : (() => {
+      let key: Buffer;
+      let cert: Buffer;
+      try {
+        key = fs.readFileSync(SSL_KEY_PATH);
+        cert = fs.readFileSync(SSL_CERT_PATH);
+      } catch {
+        console.error(
+          `TLS files not found.\n  Expected key: ${SSL_KEY_PATH}\n  Expected cert: ${SSL_CERT_PATH}\n` +
+            'Generate with: openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt -days 365 -nodes -subj "/CN=localhost"\n' +
+            'Place files in server/certs/ (see server/README.md).\n' +
+            'For Render / TLS at the edge, set RENDER=true or USE_HTTP=true (no cert files needed).'
+        );
+        process.exit(1);
+      }
+      return https.createServer({ key, cert }, probeHandler);
+    })();
 
 const wss = new WebSocketServer({ server });
 
@@ -255,7 +291,10 @@ async function handleSocketMessage(meta: ClientMeta, raw: Buffer) {
 
 wss.on('connection', (ws, req) => {
   const host = req.headers.host || 'localhost';
-  const url = new URL(req.url || '/', `https://${host}`);
+  const proto =
+    (req.headers['x-forwarded-proto'] as string)?.split(',')[0]?.trim() ||
+    (usePlainHttp ? 'http' : 'https');
+  const url = new URL(req.url || '/', `${proto}://${host}`);
   const token = url.searchParams.get('token');
   if (!token) {
     sendJson(ws, { type: 'error', message: 'Missing token' });
@@ -312,6 +351,10 @@ wss.on('connection', (ws, req) => {
   })();
 });
 
-server.listen(PORT, () => {
-  console.log(`HTTPS + WSS listening on port ${PORT} (TLS)`);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(
+    usePlainHttp
+      ? `HTTP + WSS on port ${PORT} (TLS terminated upstream; bind 0.0.0.0)`
+      : `HTTPS + WSS listening on port ${PORT} (TLS)`
+  );
 });
